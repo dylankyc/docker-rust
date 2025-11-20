@@ -1,0 +1,74 @@
+# BUILDER STAGE (unchanged from the most minimal option)
+FROM rust:1.90.0-alpine AS builder
+
+WORKDIR /app
+
+# Install build dependencies
+# musl-dev is required for static linking on Alpine
+RUN apk add --no-cache \
+    musl-dev \
+    pkgconf \
+    openssl-dev \
+    ca-certificates \
+    curl \
+    build-base \
+    cmake \
+    cyrus-sasl-dev \
+    zstd-dev \
+    perl
+
+# Copy Cargo.toml and Cargo.lock
+COPY Cargo.toml Cargo.lock ./
+
+# Create empty source files to cache dependencies
+# Note: You can optimize dependency caching by adding:
+# [profile.release]
+# opt-level = "z" # Optimize for size
+# in your Cargo.toml
+RUN mkdir -p src/bin && \
+    echo "fn main() {}" > src/bin/hello-world.rs && \
+    echo "pub fn lib() {}" > src/lib.rs
+
+# Build dependencies (this layer will be cached)
+RUN cargo build --release
+
+# Remove the dummy source files
+RUN rm -rf src
+
+# Copy the actual source code
+COPY src/ src/
+
+# Build the application
+RUN touch src/bin/hello-world.rs && \
+    touch src/lib.rs && \
+    cargo build --release
+
+# FINAL STAGE (The absolute smallest base image for a musl-linked binary)
+FROM alpine:latest
+
+WORKDIR /app
+
+# Install only the absolute minimum for runtime (ca-certificates for TLS/HTTPS)
+# Install curl only if the HEALTHCHECK is absolutely necessary
+RUN apk add --no-cache ca-certificates \
+    curl
+
+    # NOTE: what else might be needed at runtime?
+    # openssl
+
+
+# Copy the compiled binaries and config
+COPY --from=builder /app/target/release/hello-world /app/server
+
+# RUN useradd -r -u 1000 appuser && \
+#     chown appuser:appuser /app/server
+# 
+# USER appuser
+
+# Add a healthcheck
+
+# Expose necessary ports
+EXPOSE 9999
+
+# Set the entrypoint
+ENTRYPOINT ["/app/server"]

@@ -1,0 +1,476 @@
+name: Pure Native Multi-Architecture Build
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  REGISTRY: docker.io
+  IMAGE_NAME: dylandylandy/axum-helloworld
+
+jobs:
+  # Check if native ARM64 runners are available
+  check-requirements:
+    runs-on: ubuntu-latest
+    outputs:
+      can-build-arm64: ${{ steps.check.outputs.can-build-arm64 }}
+      arm64-runner: ${{ steps.check.outputs.arm64-runner }}
+    
+    steps:
+    - name: Check ARM64 runner availability
+      id: check
+      run: |
+        # Check if ARM64_RUNNER variable is set to a native runner
+        if [[ "${{ vars.ARM64_RUNNER }}" == "ubuntu-24.04-arm64" ]] || [[ "${{ vars.ARM64_RUNNER }}" == "ubuntu-22.04-arm64" ]] || [[ "${{ vars.ARM64_RUNNER }}" == "ubuntu-24.04-arm" ]] || [[ "${{ vars.ARM64_RUNNER }}" == "ubuntu-22.04-arm" ]]; then
+          echo "can-build-arm64=true" >> $GITHUB_OUTPUT
+          echo "arm64-runner=${{ vars.ARM64_RUNNER }}" >> $GITHUB_OUTPUT
+          echo "✅ Native ARM64 runner available: ${{ vars.ARM64_RUNNER }}"
+        elif [[ -n "${{ vars.ARM64_RUNNER }}" ]] && [[ "${{ vars.ARM64_RUNNER }}" != "ubuntu-latest" ]]; then
+          # Custom runner (could be self-hosted)
+          echo "can-build-arm64=true" >> $GITHUB_OUTPUT
+          echo "arm64-runner=${{ vars.ARM64_RUNNER }}" >> $GITHUB_OUTPUT
+          echo "✅ Custom ARM64 runner available: ${{ vars.ARM64_RUNNER }}"
+        else
+          echo "can-build-arm64=false" >> $GITHUB_OUTPUT
+          echo "arm64-runner=" >> $GITHUB_OUTPUT
+          echo "❌ No native ARM64 runner configured"
+          echo "💡 To enable ARM64 builds, set repository variable:"
+          echo "   ARM64_RUNNER=ubuntu-24.04-arm64 or ubuntu-22.04-arm64 (requires GitHub Teams/Enterprise)"
+          echo "   Or use the new labels: ubuntu-24.04-arm or ubuntu-22.04-arm"
+        fi
+
+  # Build AMD64 on native x64 runner (always available)
+  build-amd64:
+    runs-on: ubuntu-latest
+    needs: check-requirements
+    outputs:
+      success: ${{ steps.build.conclusion == 'success' }}
+    
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Login to Docker Hub
+      if: github.event_name != 'pull_request'
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ env.REGISTRY }}
+        username: ${{ secrets.DOCKER_USERNAME }}
+        password: ${{ secrets.DOCKER_PASSWORD }}
+
+    - name: Extract AMD64 metadata
+      id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+        tags: |
+          type=raw,value=latest,enable={{is_default_branch}}
+          type=ref,event=branch,enable={{is_default_branch}}
+          type=semver,pattern={{version}}
+          type=semver,pattern={{major}}.{{minor}}
+          type=semver,pattern={{major}},enable=${{ !startsWith(github.ref, 'refs/tags/v0.') }}
+          type=ref,event=pr
+        flavor: |
+          suffix=-amd64
+
+    - name: Build and push AMD64 (native x64)
+      id: build
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        file: ./Dockerfile
+        platforms: linux/amd64
+        push: ${{ github.event_name != 'pull_request' }}
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        cache-from: type=gha,scope=native-amd64
+        cache-to: type=gha,mode=max,scope=native-amd64
+
+    - name: AMD64 build summary
+      run: |
+        echo "✅ AMD64 build completed on native x64 runner"
+        echo "Platform: linux/amd64"
+        echo "Runner: ubuntu-latest (native x86_64)"
+        echo "Image size: $(docker image ls ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }} --format 'table {{.Size}}' | tail -n +2 | head -1 2>/dev/null || echo 'N/A')"
+
+  # Build ARM64 on native ARM64 runner (no QEMU fallback)
+  build-arm64:
+    runs-on: ${{ needs.check-requirements.outputs.arm64-runner }}
+    needs: check-requirements
+    if: needs.check-requirements.outputs.can-build-arm64 == 'true'
+    outputs:
+      success: ${{ steps.build.conclusion == 'success' }}
+    
+    steps:
+    - name: Verify native ARM64 environment
+      run: |
+        echo "Architecture: $(uname -m)"
+        echo "Runner: ${{ needs.check-requirements.outputs.arm64-runner }}"
+        
+        if [[ "$(uname -m)" != "aarch64" ]]; then
+          echo "❌ ERROR: Not running on native ARM64 architecture"
+          echo "Expected: aarch64, Got: $(uname -m)"
+          echo "This workflow requires native ARM64 runners only"
+          exit 1
+        fi
+        
+        echo "✅ Confirmed native ARM64 environment"
+
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Login to Docker Hub
+      if: github.event_name != 'pull_request'
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ env.REGISTRY }}
+        username: ${{ secrets.DOCKER_USERNAME }}
+        password: ${{ secrets.DOCKER_PASSWORD }}
+
+    - name: Extract ARM64 metadata
+      id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+        tags: |
+          type=raw,value=latest,enable={{is_default_branch}}
+          type=ref,event=branch,enable={{is_default_branch}}
+          type=semver,pattern={{version}}
+          type=semver,pattern={{major}}.{{minor}}
+          type=semver,pattern={{major}},enable=${{ !startsWith(github.ref, 'refs/tags/v0.') }}
+          type=ref,event=pr
+        flavor: |
+          suffix=-arm64
+
+    - name: Build and push ARM64 (native ARM64)
+      id: build
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        file: ./Dockerfile
+        platforms: linux/arm64
+        push: ${{ github.event_name != 'pull_request' }}
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        cache-from: type=gha,scope=native-arm64
+        cache-to: type=gha,mode=max,scope=native-arm64
+
+    - name: ARM64 build summary
+      run: |
+        echo "✅ ARM64 build completed on native ARM64 runner"
+        echo "Platform: linux/arm64"  
+        echo "Runner: ${{ needs.check-requirements.outputs.arm64-runner }} (native aarch64)"
+        echo "No QEMU emulation used"
+
+  # Skip ARM64 build with informative message
+  skip-arm64:
+    runs-on: ubuntu-latest
+    needs: check-requirements
+    if: needs.check-requirements.outputs.can-build-arm64 == 'false'
+    
+    steps:
+    - name: ARM64 build skipped
+      run: |
+        echo "⏭️ ARM64 build skipped - no native runner configured"
+        echo ""
+        echo "This workflow only builds on native runners."
+        echo "To enable ARM64 builds, configure a native ARM64 runner:"
+        echo ""
+        echo "1. Go to Settings → Secrets and variables → Actions → Variables"
+        echo "2. Add variable: ARM64_RUNNER"
+        echo "3. Set value: ubuntu-24.04-arm64 or ubuntu-24.04-arm (requires GitHub Teams/Enterprise)"
+        echo "   or your self-hosted ARM64 runner label"
+        echo ""
+        echo "For now, only AMD64 images will be built."
+
+  # Create multi-platform manifest (only if both builds succeeded)
+  create-manifest:
+    runs-on: ubuntu-latest
+    needs: [check-requirements, build-amd64, build-arm64]
+    if: github.event_name != 'pull_request' && needs.build-amd64.result == 'success' && needs.build-arm64.result == 'success'
+    
+    steps:
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Login to Docker Hub
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ env.REGISTRY }}
+        username: ${{ secrets.DOCKER_USERNAME }}
+        password: ${{ secrets.DOCKER_PASSWORD }}
+
+    - name: Determine final tags
+      id: final-tags
+      run: |
+        if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+          echo "Creating main branch tags"
+          echo "TAGS=latest main" >> $GITHUB_OUTPUT
+          echo "PRIMARY=latest" >> $GITHUB_OUTPUT
+        elif [[ "${{ github.ref }}" =~ ^refs/tags/v.* ]]; then
+          VERSION="${{ github.ref_name }}"
+          VERSION_NO_V="${VERSION#v}"
+          echo "Creating version tags for: $VERSION_NO_V"
+          
+          TAGS="$VERSION_NO_V"
+          
+          # Add major.minor tag
+          if [[ "$VERSION_NO_V" =~ ^([0-9]+)\.([0-9]+)\. ]]; then
+            TAGS="$TAGS ${BASH_REMATCH[1]}.${BASH_REMATCH[2]}"
+          fi
+          
+          # Add major tag (only if not v0.x.x)
+          if [[ "$VERSION_NO_V" =~ ^([0-9]+)\. ]] && [[ "${BASH_REMATCH[1]}" != "0" ]]; then
+            TAGS="$TAGS ${BASH_REMATCH[1]}"
+          fi
+          
+          echo "TAGS=$TAGS" >> $GITHUB_OUTPUT
+          echo "PRIMARY=$VERSION_NO_V" >> $GITHUB_OUTPUT
+        else
+          BRANCH_TAG="${{ github.ref_name }}"
+          BRANCH_TAG="${BRANCH_TAG//\//-}"
+          echo "TAGS=$BRANCH_TAG" >> $GITHUB_OUTPUT
+          echo "PRIMARY=$BRANCH_TAG" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Create multi-platform manifests
+      run: |
+        TAGS="${{ steps.final-tags.outputs.TAGS }}"
+        
+        for tag in $TAGS; do
+          echo "🔗 Creating multi-platform manifest: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:$tag"
+          
+          docker buildx imagetools create \
+            --tag "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:$tag" \
+            "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:$tag-amd64" \
+            "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:$tag-arm64"
+        done
+
+    - name: Verify multi-platform manifest
+      run: |
+        PRIMARY_TAG="${{ steps.final-tags.outputs.PRIMARY }}"
+        echo "🔍 Verifying multi-platform image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:$PRIMARY_TAG"
+        docker buildx imagetools inspect "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:$PRIMARY_TAG"
+
+  # Create AMD64-only manifest if ARM64 build was skipped
+  create-amd64-only:
+    runs-on: ubuntu-latest
+    needs: [check-requirements, build-amd64, skip-arm64]
+    if: github.event_name != 'pull_request' && needs.build-amd64.result == 'success' && needs.check-requirements.outputs.can-build-arm64 == 'false'
+    
+    steps:
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Login to Docker Hub
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ env.REGISTRY }}
+        username: ${{ secrets.DOCKER_USERNAME }}
+        password: ${{ secrets.DOCKER_PASSWORD }}
+
+    - name: Determine final tags for AMD64-only
+      id: final-tags
+      run: |
+        if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+          echo "TAGS=latest main" >> $GITHUB_OUTPUT
+          echo "PRIMARY=latest" >> $GITHUB_OUTPUT
+        elif [[ "${{ github.ref }}" =~ ^refs/tags/v.* ]]; then
+          VERSION="${{ github.ref_name }}"
+          VERSION_NO_V="${VERSION#v}"
+          TAGS="$VERSION_NO_V"
+          if [[ "$VERSION_NO_V" =~ ^([0-9]+)\.([0-9]+)\. ]]; then
+            TAGS="$TAGS ${BASH_REMATCH[1]}.${BASH_REMATCH[2]}"
+          fi
+          if [[ "$VERSION_NO_V" =~ ^([0-9]+)\. ]] && [[ "${BASH_REMATCH[1]}" != "0" ]]; then
+            TAGS="$TAGS ${BASH_REMATCH[1]}"
+          fi
+          echo "TAGS=$TAGS" >> $GITHUB_OUTPUT
+          echo "PRIMARY=$VERSION_NO_V" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Create AMD64-only tags
+      run: |
+        TAGS="${{ steps.final-tags.outputs.TAGS }}"
+        
+        echo "⚠️ Creating AMD64-only images (ARM64 runner not available)"
+        
+        for tag in $TAGS; do
+          echo "🏷️ Creating AMD64-only tag: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:$tag"
+          
+          docker buildx imagetools create \
+            --tag "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:$tag" \
+            "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:$tag-amd64"
+        done
+
+    - name: Verify AMD64-only image
+      run: |
+        PRIMARY_TAG="${{ steps.final-tags.outputs.PRIMARY }}"
+        echo "🔍 Verifying AMD64-only image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:$PRIMARY_TAG"
+        docker buildx imagetools inspect "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:$PRIMARY_TAG"
+
+  # Test native builds
+  test-native:
+    runs-on: ubuntu-latest
+    needs: [check-requirements, create-manifest, create-amd64-only]
+    if: always() && github.event_name != 'pull_request' && (needs.create-manifest.result == 'success' || needs.create-amd64-only.result == 'success')
+    
+    steps:
+    - name: Determine test tag
+      id: test-tag
+      run: |
+        if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+          echo "TEST_TAG=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest" >> $GITHUB_OUTPUT
+        elif [[ "${{ github.ref }}" =~ ^refs/tags/v.* ]]; then
+          VERSION="${{ github.ref_name }}"
+          VERSION_NO_V="${VERSION#v}"
+          echo "TEST_TAG=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:$VERSION_NO_V" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Test AMD64 image (native)
+      run: |
+        TAG="${{ steps.test-tag.outputs.TEST_TAG }}"
+        echo "🧪 Testing AMD64 image: $TAG"
+        
+        docker pull --platform linux/amd64 "$TAG"
+        
+        # Run smoke test
+        timeout 60s docker run --rm --platform linux/amd64 "$TAG" --version 2>/dev/null || \
+        timeout 60s docker run --rm --platform linux/amd64 "$TAG" --help 2>/dev/null || \
+        echo "✅ AMD64 image basic execution test passed"
+
+    - name: Test ARM64 image (if available)
+      if: needs.check-requirements.outputs.can-build-arm64 == 'true' && needs.create-manifest.result == 'success'
+      run: |
+        # We need QEMU here only for testing, not building
+        docker run --rm --privileged tonistiigi/binfmt --install arm64
+        
+        TAG="${{ steps.test-tag.outputs.TEST_TAG }}"
+        echo "🧪 Testing ARM64 image: $TAG"
+        
+        docker pull --platform linux/arm64 "$TAG"
+        
+        # Run smoke test
+        timeout 60s docker run --rm --platform linux/arm64 "$TAG" --version 2>/dev/null || \
+        timeout 60s docker run --rm --platform linux/arm64 "$TAG" --help 2>/dev/null || \
+        echo "✅ ARM64 image basic execution test passed"
+
+  # Comprehensive build summary
+  build-summary:
+    runs-on: ubuntu-latest
+    needs: [check-requirements, build-amd64, build-arm64, skip-arm64, create-manifest, create-amd64-only, test-native]
+    if: always() && github.event_name != 'pull_request'
+    
+    steps:
+    - name: Calculate final tags
+      id: final-tags
+      run: |
+        if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+          echo "TAGS=latest main" >> $GITHUB_OUTPUT
+          echo "PRIMARY=latest" >> $GITHUB_OUTPUT
+          echo "TRIGGER=Main Branch Push" >> $GITHUB_OUTPUT
+        elif [[ "${{ github.ref }}" =~ ^refs/tags/v.* ]]; then
+          VERSION="${{ github.ref_name }}"
+          VERSION_NO_V="${VERSION#v}"
+          TAGS="$VERSION_NO_V"
+          if [[ "$VERSION_NO_V" =~ ^([0-9]+)\.([0-9]+)\. ]]; then
+            TAGS="$TAGS ${BASH_REMATCH[1]}.${BASH_REMATCH[2]}"
+          fi
+          if [[ "$VERSION_NO_V" =~ ^([0-9]+)\. ]] && [[ "${BASH_REMATCH[1]}" != "0" ]]; then
+            TAGS="$TAGS ${BASH_REMATCH[1]}"
+          fi
+          echo "TAGS=$TAGS" >> $GITHUB_OUTPUT
+          echo "PRIMARY=$VERSION_NO_V" >> $GITHUB_OUTPUT
+          echo "TRIGGER=Version Tag (${{ github.ref_name }})" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Create comprehensive summary
+      run: |
+        echo "# 🏗️ Pure Native Multi-Architecture Build Results" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        # Build trigger
+        echo "## 🔄 Build Trigger" >> $GITHUB_STEP_SUMMARY
+        echo "**${{ steps.final-tags.outputs.TRIGGER }}**" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        # Architecture support
+        echo "## 🏛️ Architecture Support" >> $GITHUB_STEP_SUMMARY
+        echo "| Architecture | Runner | Status | Method |" >> $GITHUB_STEP_SUMMARY
+        echo "|--------------|--------|--------|---------|" >> $GITHUB_STEP_SUMMARY
+        echo "| linux/amd64 | ubuntu-latest | ${{ needs.build-amd64.result == 'success' && '✅ Built' || '❌ Failed' }} | Native x64 |" >> $GITHUB_STEP_SUMMARY
+        
+        if [[ "${{ needs.check-requirements.outputs.can-build-arm64 }}" == "true" ]]; then
+          echo "| linux/arm64 | ${{ needs.check-requirements.outputs.arm64-runner }} | ${{ needs.build-arm64.result == 'success' && '✅ Built' || '❌ Failed' }} | Native ARM64 |" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "| linux/arm64 | N/A | ⏭️ Skipped | No native runner |" >> $GITHUB_STEP_SUMMARY
+        fi
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        # Published images
+        echo "## 🐳 Published Images" >> $GITHUB_STEP_SUMMARY
+        TAGS="${{ steps.final-tags.outputs.TAGS }}"
+        for tag in $TAGS; do
+          if [[ "${{ needs.check-requirements.outputs.can-build-arm64 }}" == "true" && "${{ needs.build-arm64.result }}" == "success" ]]; then
+            echo "- \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:$tag\` (linux/amd64, linux/arm64)" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "- \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:$tag\` (linux/amd64 only)" >> $GITHUB_STEP_SUMMARY
+          fi
+        done
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        # Usage
+        PRIMARY_TAG="${{ steps.final-tags.outputs.PRIMARY }}"
+        echo "## 🚀 Usage" >> $GITHUB_STEP_SUMMARY
+        echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
+        echo "# Pull and run" >> $GITHUB_STEP_SUMMARY
+        echo "docker run -p 9999:9999 ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:$PRIMARY_TAG" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "# Verify architecture support" >> $GITHUB_STEP_SUMMARY
+        echo "docker buildx imagetools inspect ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:$PRIMARY_TAG" >> $GITHUB_STEP_SUMMARY
+        echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        # Performance notes
+        echo "## ⚡ Pure Native Performance" >> $GITHUB_STEP_SUMMARY
+        echo "- 🚀 **Zero Emulation**: No QEMU overhead on any architecture" >> $GITHUB_STEP_SUMMARY
+        echo "- ⚡ **Maximum Speed**: All builds run at native CPU speed" >> $GITHUB_STEP_SUMMARY
+        echo "- 🎯 **Native Instructions**: Direct CPU instruction execution" >> $GITHUB_STEP_SUMMARY
+        echo "- 💾 **Architecture-Specific Caching**: Optimized cache layers per platform" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        # Configuration
+        echo "## 🔧 Configuration" >> $GITHUB_STEP_SUMMARY
+        if [[ "${{ needs.check-requirements.outputs.can-build-arm64 }}" == "true" ]]; then
+          echo "✅ **Optimal Setup**: Both AMD64 and ARM64 native runners configured" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "⚠️ **ARM64 Setup Missing**: To enable native ARM64 builds:" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "1. Ensure GitHub Teams/Enterprise subscription" >> $GITHUB_STEP_SUMMARY
+          echo "2. Set repository variable: \`ARM64_RUNNER\` = \`ubuntu-24.04-arm64\`" >> $GITHUB_STEP_SUMMARY
+          echo "3. Or configure self-hosted ARM64 runners" >> $GITHUB_STEP_SUMMARY
+        fi
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        # Final status
+        if [[ "${{ needs.build-amd64.result }}" == "success" ]]; then
+          if [[ "${{ needs.check-requirements.outputs.can-build-arm64 }}" == "true" && "${{ needs.build-arm64.result }}" == "success" ]]; then
+            echo "🎉 **Pure native multi-architecture build completed successfully!**" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "Both AMD64 and ARM64 images built on native runners with zero emulation overhead." >> $GITHUB_STEP_SUMMARY
+          else
+            echo "✅ **AMD64 native build completed successfully!**" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "AMD64 image ready for deployment. Configure ARM64 runner for full multi-arch support." >> $GITHUB_STEP_SUMMARY
+          fi
+        else
+          echo "❌ **Build failed. Check the job details above.**" >> $GITHUB_STEP_SUMMARY

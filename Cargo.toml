@@ -1,0 +1,85 @@
+[package]
+name = "axum-example"
+version = "0.1.0"
+edition = "2021"
+
+# Build profiles to optimize compilation and reduce issues with native dependencies
+[profile.release]
+opt-level = "z"  # Optimize for size
+lto = true       # Enable link-time optimization
+codegen-units = 1
+panic = "abort"
+strip = true     # Strip debug symbols
+
+[profile.dev]
+opt-level = 1    # Slight optimization for faster debug builds
+debug = 1        # Reduced debug info for faster linking
+overflow-checks = true
+
+# Custom profile for development with compression testing
+[profile.dev-compress]
+inherits = "dev"
+opt-level = 2
+debug = 1
+
+[dependencies]
+async-trait = "0.1.89"
+axum = "0.8.4"
+chrono = { version = "0.4.42", features = ["serde"] }
+governor = "0.10.1"
+hyper = { version = "1.6.0", features = ["full"] }
+hyper-util = { version = "0.1.16", features = ["tokio"] }
+rand = "0.9.2"
+redis = { version = "0.32.7", features = ["tokio-comp"] }
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1.0.145"
+thiserror = "2.0.17"
+tokio = { version = "1.46.1", features = ["macros", "rt-multi-thread", "sync", "signal", "time", "tracing"] }
+tower = { version = "0.5.2", features = ["full"] }
+
+# Enable full compression support including ZSTD
+tower-http = { version = "0.6.6", features = [
+    "cors", 
+    "trace", 
+    "timeout", 
+    "limit", 
+    "auth", 
+    "request-id", 
+    "util",
+    "compression-full",     # Enables all compression algorithms including zstd
+    "decompression-full"    # Enables all decompression algorithms including zstd
+] }
+
+tower_governor = "0.8.0"
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
+uuid = { version = "1.17.0", features = ["serde", "v4"] }
+
+# Optional: Add direct zstd dependency for custom compression logic
+zstd = { version = "0.13", optional = true }
+
+# Optional: Pure Rust zstd implementation as fallback
+ruzstd = { version = "0.5", optional = true }
+
+[features]
+default = ["system-zstd"]
+
+# Use system ZSTD libraries (recommended for Docker builds)
+system-zstd = []
+
+# Use bundled ZSTD (may cause build issues in cross-platform Docker)
+bundled-zstd = ["zstd"]
+
+# Use pure Rust ZSTD implementation (slower but no C compilation)
+pure-rust-zstd = ["ruzstd"]
+
+# Enable all compression features
+full-compression = ["system-zstd"]
+
+[[bin]]
+name = "helloworld"
+path = "src/bin/helloworld.rs"
+
+[lib]
+name = "axum_example"
+path = "src/lib.rs"
